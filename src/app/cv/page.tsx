@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useState, useRef } from "react";
-import { CertificateUpload, CertificateUploadPayload } from "@/components/certificateUpload";
+import { CertificateUpload } from "@/components/certificateUpload";
 import { AuthGuard } from "@/components/authGuard";
 import { supabase } from "@/lib/supabaseClient";
 import { useSupabaseUser } from "@/hooks/useSupabaseUser";
@@ -45,9 +45,12 @@ export default function CvPage() {
   const [skillResults, setSkillResults] = useState<SkillOption[]>([]);
   const [skillLoading, setSkillLoading] = useState(false);
   const [skillSearchTouched, setSkillSearchTouched] = useState(false);
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [certIdForSkill, setCertIdForSkill] = useState<string | null>(null);
 
+  // ---------------------------------------------------
+  // Carregar certificados do usuário
+  // ---------------------------------------------------
   useEffect(() => {
     if (!user || loadingUser) return;
 
@@ -80,7 +83,9 @@ export default function CvPage() {
         console.error("Erro ao carregar certificados:", error);
         setErrorMsg("Não foi possível carregar seus certificados.");
       } else if (data) {
-        const mapped: Certificate[] = data.map((row: any) => ({
+        const rows = data as any[];
+
+        const mapped: Certificate[] = rows.map((row) => ({
           id: row.id,
           titulo: row.titulo,
           emissor: row.emissor,
@@ -104,89 +109,115 @@ export default function CvPage() {
     fetchCertificates();
   }, [user, loadingUser]);
 
-  async function handleSaveNewCertificate(data: CertificateUploadPayload) {
-    if (!user) return;
+  // ---------------------------------------------------
+  // Salvar novo certificado (callback do CertificateUpload)
+  // ---------------------------------------------------
+  function handleSaveNewCertificate(payload: any) {
+    (async () => {
+      if (!user) return;
 
-    setErrorMsg(null);
-    setSuccessMsg(null);
+      setErrorMsg(null);
+      setSuccessMsg(null);
 
-    try {
-      // 1) Upload do arquivo no bucket certificates
-      const fileExt = data.file.name.split(".").pop() || "pdf";
-      const filePath = `user-${user.id}/${Date.now()}.${fileExt}`;
+      try {
+        // Esperamos que o payload tenha:
+        // - file: File
+        // - titulo, emissor, dataEmissao, cargaHoraria, chaveValidacao, rawText
+        const file: File = payload.file;
+        const titulo: string | null = payload.titulo ?? null;
+        const emissor: string | null = payload.emissor ?? null;
+        const dataEmissao: string | null = payload.dataEmissao ?? null;
+        const cargaHoraria: number | null =
+          typeof payload.cargaHoraria === "number"
+            ? payload.cargaHoraria
+            : payload.cargaHoraria
+            ? Number(payload.cargaHoraria)
+            : null;
+        const chaveValidacao: string | null =
+          payload.chaveValidacao ?? null;
+        const rawText: string | null = payload.rawText ?? null;
 
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from("certificates")
-        .upload(filePath, data.file, {
-          cacheControl: "3600",
-          upsert: false,
-        });
+        // 1) Upload do arquivo no bucket certificates
+        const fileExt = file.name.split(".").pop() || "pdf";
+        const filePath = `user-${user.id}/${Date.now()}.${fileExt}`;
 
-      if (uploadError || !uploadData) {
-        console.error("Erro ao fazer upload do certificado:", uploadError);
-        throw new Error("Falha ao enviar o arquivo do certificado.");
-      }
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from("certificates")
+          .upload(filePath, file, {
+            cacheControl: "3600",
+            upsert: false,
+          });
 
-      const { data: publicData } = supabase
-        .storage
-        .from("certificates")
-        .getPublicUrl(uploadData.path);
+        if (uploadError || !uploadData) {
+          console.error("Erro ao fazer upload do certificado:", uploadError);
+          throw new Error("Falha ao enviar o arquivo do certificado.");
+        }
 
-      const publicUrl = publicData.publicUrl;
+        const { data: publicData } = supabase.storage
+          .from("certificates")
+          .getPublicUrl(uploadData.path);
 
-      // 2) Insert na tabela certificates
-      const { data: inserted, error: insertError } = await supabase
-        .from("certificates")
-        .insert({
-          user_id: user.id,
-          titulo: data.titulo || null,
-          emissor: data.emissor || null,
-          data_emissao: data.dataEmissao || null,
-          carga_horaria: data.cargaHoraria ?? null,
-          chave_validacao: data.chaveValidacao ?? null,
-          raw_text: data.rawText,
-          file_path: uploadData.path,
-          file_url: publicUrl,
-        })
-        .select(
+        const publicUrl = publicData.publicUrl;
+
+        // 2) Insert na tabela certificates
+        const { data: inserted, error: insertError } = await supabase
+          .from("certificates")
+          .insert({
+            user_id: user.id,
+            titulo,
+            emissor,
+            data_emissao: dataEmissao,
+            carga_horaria: cargaHoraria,
+            chave_validacao: chaveValidacao,
+            raw_text: rawText,
+            file_path: uploadData.path,
+            file_url: publicUrl,
+          })
+          .select(
+            `
+            id,
+            titulo,
+            emissor,
+            data_emissao,
+            carga_horaria,
+            chave_validacao,
+            file_url,
+            raw_text
           `
-          id,
-          titulo,
-          emissor,
-          data_emissao,
-          carga_horaria,
-          chave_validacao,
-          file_url,
-          raw_text
-        `
-        )
-        .single();
+          )
+          .single();
 
-      if (insertError || !inserted) {
-        console.error("Erro ao salvar certificado no banco:", insertError);
-        throw new Error("Não foi possível salvar o certificado.");
+        if (insertError || !inserted) {
+          console.error("Erro ao salvar certificado no banco:", insertError);
+          throw new Error("Não foi possível salvar o certificado.");
+        }
+
+        const newCert: Certificate = {
+          id: inserted.id,
+          titulo: inserted.titulo,
+          emissor: inserted.emissor,
+          data_emissao: inserted.data_emissao,
+          carga_horaria: inserted.carga_horaria,
+          chave_validacao: inserted.chave_validacao,
+          file_url: inserted.file_url,
+          raw_text: inserted.raw_text,
+          skills: [],
+        };
+
+        setCertificates((prev) => [newCert, ...prev]);
+        setSuccessMsg("Certificado salvo com sucesso.");
+      } catch (err) {
+        console.error("Erro ao salvar novo certificado:", err);
+        const message =
+          err instanceof Error ? err.message : "Erro ao salvar certificado.";
+        setErrorMsg(message);
       }
-
-      const newCert: Certificate = {
-        id: inserted.id,
-        titulo: inserted.titulo,
-        emissor: inserted.emissor,
-        data_emissao: inserted.data_emissao,
-        carga_horaria: inserted.carga_horaria,
-        chave_validacao: inserted.chave_validacao,
-        file_url: inserted.file_url,
-        raw_text: inserted.raw_text,
-        skills: [],
-      };
-
-      setCertificates((prev) => [newCert, ...prev]);
-      setSuccessMsg("Certificado salvo com sucesso.");
-    } catch (err: any) {
-      console.error("Erro ao salvar novo certificado:", err);
-      setErrorMsg(err?.message || "Erro ao salvar certificado.");
-    }
+    })();
   }
 
+  // ---------------------------------------------------
+  // Atualizar certificado
+  // ---------------------------------------------------
   async function handleUpdateCertificate(cert: Certificate) {
     if (!user) return;
 
@@ -217,6 +248,9 @@ export default function CvPage() {
     setSavingCertId(null);
   }
 
+  // ---------------------------------------------------
+  // Remover certificado
+  // ---------------------------------------------------
   async function handleDeleteCertificate(certId: string) {
     if (!user) return;
 
@@ -241,7 +275,9 @@ export default function CvPage() {
     setDeletingCertId(null);
   }
 
-  // ---- Skills por certificado ----
+  // ---------------------------------------------------
+  // Busca de skills por certificado
+  // ---------------------------------------------------
   async function handleSearchSkills(term: string, certId: string) {
     setSkillSearch(term);
     setSkillResults([]);
@@ -270,9 +306,11 @@ export default function CvPage() {
           setSkillLoading(false);
           return;
         }
-        const json = await res.json();
+        const json = (await res.json()) as {
+          skills?: { id: string; name: string; category?: string | null }[];
+        };
         setSkillResults(
-          (json.skills || []).map((s: any) => ({
+          (json.skills || []).map((s) => ({
             id: s.id,
             name: s.name,
             category: s.category ?? null,
@@ -286,6 +324,9 @@ export default function CvPage() {
     }, 300);
   }
 
+  // ---------------------------------------------------
+  // Vincular skill ao certificado
+  // ---------------------------------------------------
   async function handleAddSkillToCertificate(certId: string, skill: SkillOption) {
     if (!user) return;
 
@@ -328,6 +369,9 @@ export default function CvPage() {
     }
   }
 
+  // ---------------------------------------------------
+  // Remover skill do certificado
+  // ---------------------------------------------------
   async function handleRemoveSkillFromCertificate(
     certId: string,
     skillId: string
@@ -357,6 +401,9 @@ export default function CvPage() {
     }
   }
 
+  // ---------------------------------------------------
+  // Atualizar certificado localmente (inputs controlados)
+  // ---------------------------------------------------
   function updateCertificateLocal(
     certId: string,
     patch: Partial<Certificate>
@@ -366,6 +413,9 @@ export default function CvPage() {
     );
   }
 
+  // ---------------------------------------------------
+  // Render
+  // ---------------------------------------------------
   if (loadingUser) {
     return (
       <AuthGuard>
@@ -388,7 +438,7 @@ export default function CvPage() {
         </div>
 
         {/* Upload + OCR + revisão antes de salvar */}
-        <CertificateUpload onSave={handleSaveNewCertificate} />
+        <CertificateUpload onSaved={handleSaveNewCertificate} />
 
         {/* Lista de certificados */}
         <section className="card space-y-3">
