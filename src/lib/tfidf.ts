@@ -1,39 +1,78 @@
+// src/lib/tfidf.ts
 
-/**
- * Implementação bem simples de TF-IDF + similaridade do cosseno
- * para demonstrar o pilar de IA no projeto.
- */
-
-export function tokenize(text: string): string[] {
+export function normalize(text: string) {
   return text
     .toLowerCase()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/[^a-z0-9á-úÁ-Ú\s]/gi, "")
     .split(/\s+/)
-    .filter(Boolean);
+    .filter((w) => w.length > 2);
 }
 
-export function buildVector(text: string, vocabulary: string[]): number[] {
-  const tokens = tokenize(text);
-  return vocabulary.map((term) =>
-    tokens.includes(term) ? 1 : 0
+export function termFrequency(tokens: string[]) {
+  const tf: Record<string, number> = {};
+  tokens.forEach((t) => (tf[t] = (tf[t] || 0) + 1));
+  const total = tokens.length;
+  Object.keys(tf).forEach((t) => (tf[t] = tf[t] / total));
+  return tf;
+}
+
+export function inverseDocumentFrequency(docs: string[][]) {
+  const idf: Record<string, number> = {};
+  const totalDocs = docs.length;
+
+  docs.forEach((tokens) => {
+    const unique = new Set(tokens);
+    unique.forEach((word) => {
+      idf[word] = (idf[word] || 0) + 1;
+    });
+  });
+
+  Object.keys(idf).forEach(
+    (word) => (idf[word] = Math.log(totalDocs / idf[word]))
   );
+
+  return idf;
 }
 
-export function cosineSimilarity(a: number[], b: number[]): number {
-  const dot = a.reduce((sum, v, i) => sum + v * b[i], 0);
-  const magA = Math.sqrt(a.reduce((sum, v) => sum + v * v, 0));
-  const magB = Math.sqrt(b.reduce((sum, v) => sum + v * v, 0));
-  if (!magA || !magB) return 0;
-  return dot / (magA * magB);
+export function vectorize(tf: Record<string, number>, idf: Record<string, number>) {
+  const vector: Record<string, number> = {};
+  Object.keys(tf).forEach((t) => {
+    vector[t] = tf[t] * (idf[t] || 0);
+  });
+  return vector;
 }
 
-export function matchScore(userText: string, targetText: string): number {
-  const vocab = Array.from(
-    new Set([...tokenize(userText), ...tokenize(targetText)])
-  );
-  const vu = buildVector(userText, vocab);
-  const vt = buildVector(targetText, vocab);
-  return cosineSimilarity(vu, vt);
+export function cosineSimilarity(a: Record<string, number>, b: Record<string, number>) {
+  const words = new Set([...Object.keys(a), ...Object.keys(b)]);
+
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+
+  words.forEach((w) => {
+    const va = a[w] || 0;
+    const vb = b[w] || 0;
+    dot += va * vb;
+    magA += va * va;
+    magB += vb * vb;
+  });
+
+  if (magA === 0 || magB === 0) return 0;
+
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+export function matchTFIDF(certText: string, targetText: string) {
+  const tokensA = normalize(certText);
+  const tokensB = normalize(targetText);
+
+  const idf = inverseDocumentFrequency([tokensA, tokensB]);
+
+  const tfA = termFrequency(tokensA);
+  const tfB = termFrequency(tokensB);
+
+  const vecA = vectorize(tfA, idf);
+  const vecB = vectorize(tfB, idf);
+
+  return cosineSimilarity(vecA, vecB);
 }
