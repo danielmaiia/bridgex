@@ -55,6 +55,18 @@ type DashboardData = {
   };
 };
 
+type SearchResult = {
+  user_id: string;
+  full_name: string | null;
+  area: string | null;
+  seniority: string | null;
+  career_goals: string | null;
+  skillsHave: string[];
+  skillsLearning: string[];
+  certificates: string[];
+  score: number;
+};
+
 function StatCard(props: {
   title: string;
   value: string | number;
@@ -115,10 +127,103 @@ function BarList(props: {
   );
 }
 
+function TalentCard({ result }: { result: SearchResult }) {
+  const {
+    full_name,
+    area,
+    seniority,
+    career_goals,
+    skillsHave,
+    skillsLearning,
+    certificates,
+    score,
+  } = result;
+
+  const scorePct = Math.min(100, Math.max(0, Math.round(score * 100)));
+
+  return (
+    <div className="border border-slate-800 rounded-2xl bg-slate-950/70 p-3 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-slate-100">
+            {full_name || "Colaborador sem nome no perfil"}
+          </p>
+          <p className="text-xs text-slate-400">
+            {area || "Área não informada"} •{" "}
+            {seniority || "Senioridade não informada"}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-[11px] text-slate-400 mb-1">Aderência</p>
+          <div className="flex items-center gap-2">
+            <div className="w-20 h-2 rounded-full bg-slate-900 overflow-hidden">
+              <div
+                className="h-2 rounded-full bg-emerald-500"
+                style={{ width: `${scorePct}%` }}
+              />
+            </div>
+            <span className="text-[11px] text-emerald-300">
+              {scorePct}%
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {career_goals && (
+        <p className="text-[11px] text-slate-400">
+          <span className="font-semibold text-slate-300">Metas: </span>
+          {career_goals}
+        </p>
+      )}
+
+      {skillsHave.length > 0 && (
+        <div className="text-[11px] text-slate-300">
+          <span className="font-semibold text-slate-200">Skills que tem: </span>
+          <span className="text-slate-400">
+            {skillsHave.slice(0, 6).join(", ")}
+            {skillsHave.length > 6 && "…"}
+          </span>
+        </div>
+      )}
+
+      {skillsLearning.length > 0 && (
+        <div className="text-[11px] text-slate-300">
+          <span className="font-semibold text-slate-200">
+            Skills em desenvolvimento:{" "}
+          </span>
+          <span className="text-slate-400">
+            {skillsLearning.slice(0, 6).join(", ")}
+            {skillsLearning.length > 6 && "…"}
+          </span>
+        </div>
+      )}
+
+      {certificates.length > 0 && (
+        <div className="text-[11px] text-slate-300">
+          <span className="font-semibold text-slate-200">
+            Certificados relevantes:{" "}
+          </span>
+          <span className="text-slate-400">
+            {certificates.slice(0, 3).join(" • ")}
+            {certificates.length > 3 && "…"}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function RhPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Busca IA
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchTouched, setSearchTouched] = useState(false);
 
   useEffect(() => {
     async function loadDashboard() {
@@ -147,6 +252,41 @@ export default function RhPage() {
     loadDashboard();
   }, []);
 
+  async function handleSearch(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    setSearchTouched(true);
+    setSearchError(null);
+
+    const query = searchTerm.trim();
+    if (!query) {
+      setSearchResults([]);
+      return;
+    }
+
+    setSearchLoading(true);
+
+    try {
+      const res = await fetch(
+        `/api/rh/search?q=${encodeURIComponent(query)}`
+      );
+      if (!res.ok) {
+        const txt = await res.text();
+        console.error("Erro ao chamar /api/rh/search:", txt);
+        setSearchError("Não foi possível executar a busca de talentos.");
+        setSearchLoading(false);
+        return;
+      }
+
+      const json = (await res.json()) as { results: SearchResult[] };
+      setSearchResults(json.results || []);
+    } catch (err) {
+      console.error("Erro inesperado em /api/rh/search:", err);
+      setSearchError("Erro inesperado ao executar a busca de talentos.");
+    } finally {
+      setSearchLoading(false);
+    }
+  }
+
   return (
     <AuthGuard>
       <main className="space-y-4 max-w-6xl mx-auto">
@@ -166,6 +306,72 @@ export default function RhPage() {
           )}
           {errorMsg && (
             <p className="text-xs text-red-400 mt-1">{errorMsg}</p>
+          )}
+        </section>
+
+        {/* Busca inteligente de talentos */}
+        <section className="card space-y-3 border border-emerald-500/40 bg-slate-950/70">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-semibold text-slate-100">
+                Busca inteligente de talentos (IA leve)
+              </p>
+              <p className="text-xs text-slate-400 mt-1">
+                Digite em linguagem natural o que você procura. Exemplo:
+                &nbsp;
+                <span className="italic text-slate-300">
+                  &quot;pleno de dados com Python e certificação Azure para
+                  projeto interno&quot;
+                </span>
+                .
+              </p>
+            </div>
+          </div>
+
+          <form
+            onSubmit={handleSearch}
+            className="flex flex-col sm:flex-row gap-2 text-sm"
+          >
+            <input
+              className="flex-1 rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-sm"
+              placeholder="Ex: analista de segurança sênior com certificação AZ-500 para liderar projeto de IAM..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+            <button
+              type="submit"
+              disabled={searchLoading}
+              className="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 text-sm font-medium hover:bg-emerald-400 disabled:opacity-60"
+            >
+              {searchLoading ? "Buscando..." : "Buscar talentos"}
+            </button>
+          </form>
+
+          {searchError && (
+            <p className="text-xs text-red-400">{searchError}</p>
+          )}
+
+          {searchTouched && !searchLoading && searchResults.length === 0 && !searchError && searchTerm.trim() && (
+            <p className="text-xs text-slate-500">
+              Nenhum perfil aderente encontrado para essa busca. Tente refinar
+              os critérios ou usar termos diferentes.
+            </p>
+          )}
+
+          {searchResults.length > 0 && (
+            <div className="space-y-2 mt-2">
+              <p className="text-[11px] text-slate-400">
+                Resultados encontrados:{" "}
+                <span className="text-emerald-300 font-semibold">
+                  {searchResults.length}
+                </span>
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {searchResults.map((r) => (
+                  <TalentCard key={r.user_id} result={r} />
+                ))}
+              </div>
+            </div>
           )}
         </section>
 
