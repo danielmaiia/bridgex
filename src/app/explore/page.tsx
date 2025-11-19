@@ -1,8 +1,8 @@
-// src/app/explore/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
 import { AuthGuard } from "@/components/authGuard";
+import { useRouter } from "next/navigation";
 
 type ListedSkill = {
   name: string;
@@ -32,6 +32,8 @@ type ApiResponse = {
 };
 
 export default function ExplorePage() {
+  const router = useRouter();
+
   const [users, setUsers] = useState<ListedUser[]>([]);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -65,7 +67,7 @@ export default function ExplorePage() {
       }
     }
 
-    loadUsers();
+    void loadUsers();
   }, []);
 
   // Filtro simples em memória
@@ -252,18 +254,17 @@ export default function ExplorePage() {
                     )}
                   </div>
 
-                  {/* Rodapé do card (placeholder para futuras ações) */}
+                  {/* Rodapé do card */}
                   <div className="flex items-center justify-between pt-1 border-t border-slate-800 mt-1">
                     <p className="text-[10px] text-slate-500">
                       Entrou em{" "}
                       {new Date(u.created_at).toLocaleDateString("pt-BR")}
                     </p>
-                    {/* Placeholder para futuras ações de rede (convidar, pedir ajuda, etc.) */}
                     <button
                       type="button"
                       className="px-2 py-1 rounded-lg border border-slate-700 text-[11px] text-slate-200 hover:border-emerald-400 hover:text-emerald-300"
-                      disabled
-                      title="Em breve: ver perfil público / convidar para microtarefas"
+                      onClick={() => router.push(`/profile/${u.id}`)}
+                      title="Ver perfil público"
                     >
                       Ver perfil
                     </button>
