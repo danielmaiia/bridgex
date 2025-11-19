@@ -93,6 +93,22 @@ export async function GET(_req: NextRequest) {
       throw tasksError;
     }
 
+    (tasks || []).forEach((t: any) => {
+      const status = (t.status as string | null) || "aberta";
+      if (status === "aberta") openTasks++;
+      else closedTasks++;
+
+      const area = (t.area as string | null) || "Não informada";
+      tasksByAreaMap[area] = (tasksByAreaMap[area] || 0) + 1;
+
+      tasksById[t.id as string] = {
+        creator_id: t.creator_id as string,
+        area: t.area ?? null,
+        status: t.status ?? null,
+      };
+    });
+
+
     const totalTasks = tasks?.length ?? 0;
 
     let openTasks = 0;
