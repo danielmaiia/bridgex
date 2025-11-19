@@ -42,6 +42,7 @@ export default function CvPage() {
   const [loadingCerts, setLoadingCerts] = useState(false);
   const [savingCertId, setSavingCertId] = useState<string | null>(null);
   const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
+  const [previewCert, setPreviewCert] = useState<Certificate | null>(null);
 
   const [allSkills, setAllSkills] = useState<SkillOption[]>([]);
   const [skillsLoaded, setSkillsLoaded] = useState(false);
@@ -596,14 +597,13 @@ export default function CvPage() {
 
                     <div className="flex flex-col items-end gap-2 text-xs">
                       {cert.file_url && (
-                        <a
-                          href={cert.file_url}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => setPreviewCert(cert)}
                           className="px-2 py-1 rounded-lg border border-slate-700 hover:border-emerald-400"
                         >
                           Ver arquivo
-                        </a>
+                        </button>
                       )}
 
                       <div className="flex gap-2">
@@ -798,6 +798,57 @@ export default function CvPage() {
             })}
           </div>
         </section>
+        {previewCert && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+            <div className="bg-slate-950 rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] flex flex-col border border-slate-800">
+              {/* Cabeçalho do modal */}
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+                <div>
+                  <p className="text-sm font-semibold text-slate-50">
+                    {previewCert.titulo || "Certificado"}
+                  </p>
+                  {previewCert.emissor && (
+                    <p className="text-xs text-slate-400">{previewCert.emissor}</p>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {previewCert.file_url && (
+                    <a
+                      href={previewCert.file_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      download
+                      className="px-3 py-1 rounded-lg border border-slate-700 text-xs hover:border-emerald-400"
+                    >
+                      Baixar
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setPreviewCert(null)}
+                    className="px-3 py-1 rounded-lg border border-slate-700 text-xs hover:border-red-500 hover:text-red-300"
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </div>
+
+              {/* Corpo com preview */}
+              <div className="flex-1">
+                {previewCert.file_url ? (
+                  <iframe
+                    src={previewCert.file_url}
+                    className="w-full h-full min-h-[60vh] rounded-b-2xl"
+                  />
+                ) : (
+                  <div className="p-4 text-xs text-slate-400">
+                    Não foi possível carregar o arquivo.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </AuthGuard>
   );
