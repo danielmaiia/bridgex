@@ -34,6 +34,7 @@ export default function RootLayout({
               <a href="/cv" className="hover:text-emerald-400">Currículo vivo</a>
               <a href="/rh" className="hover:text-emerald-400">RH</a>
               <a href="/profile" className="hover:text-emerald-400">Perfil</a>
+              <a href="/explore" className="hover:text-emerald-400">Networking</a>
             </nav>
             <UserBadge />
           </header>
