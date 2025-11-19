@@ -93,22 +93,6 @@ export async function GET(_req: NextRequest) {
       throw tasksError;
     }
 
-    (tasks || []).forEach((t: any) => {
-      const status = (t.status as string | null) || "aberta";
-      if (status === "aberta") openTasks++;
-      else closedTasks++;
-
-      const area = (t.area as string | null) || "Não informada";
-      tasksByAreaMap[area] = (tasksByAreaMap[area] || 0) + 1;
-
-      tasksById[t.id as string] = {
-        creator_id: t.creator_id as string,
-        area: t.area ?? null,
-        status: t.status ?? null,
-      };
-    });
-
-
     const totalTasks = tasks?.length ?? 0;
 
     let openTasks = 0;
@@ -196,7 +180,7 @@ export async function GET(_req: NextRequest) {
         return {
           user_id,
           full_name: prof ? (user_id as string) : (user_id as string),
-          // se quiser buscar nome mesmo, teria que repuxar full_name na query de profiles
+          // se quiser buscar nome mesmo, teria que puxar full_name na query de profiles
           area: prof?.area ?? null,
           endorsements,
         };
@@ -263,13 +247,12 @@ export async function GET(_req: NextRequest) {
     // 5.1) Ranking de certificados usando TF-IDF nos títulos
     // ===============================
 
-    // helper para tokenizar títulos
     function tokenize(text: string): string[] {
       return text
         .toLowerCase()
         .split(/\W+/)
         .map((t) => t.trim())
-        .filter((t) => t.length > 2); // ignora tokens muito curtos
+        .filter((t) => t.length > 2);
     }
 
     type CertDoc = {
@@ -291,7 +274,6 @@ export async function GET(_req: NextRequest) {
         };
       });
 
-    // mapa título normalizado -> contagem de ocorrências
     const titleCountMap: Record<string, { titulo: string; count: number }> = {};
     docs.forEach((d) => {
       const key = d.titulo.toLowerCase();
@@ -301,7 +283,6 @@ export async function GET(_req: NextRequest) {
       titleCountMap[key].count += 1;
     });
 
-    // construir IDF por termo
     const termDocFreq: Record<string, number> = {};
     docs.forEach((d) => {
       const uniqueTerms = new Set(d.tokens);
@@ -316,7 +297,6 @@ export async function GET(_req: NextRequest) {
       idfMap[term] = Math.log(totalDocs / (1 + df));
     });
 
-    // calcular TF-IDF por certificado (soma dos pesos dos termos)
     const certTFIDFMap: Record<
       string,
       { titulo: string; tfidf: number; occurrences: number }
@@ -341,7 +321,6 @@ export async function GET(_req: NextRequest) {
       const key = d.titulo.toLowerCase();
       const occurrences = titleCountMap[key]?.count ?? 1;
 
-      // score final combina relevância semântica + recorrência
       const score = tfidfSum * 0.6 + Math.log(1 + occurrences) * 0.4;
 
       certTFIDFMap[key] = {
@@ -355,7 +334,6 @@ export async function GET(_req: NextRequest) {
       .sort((a, b) => b.tfidf - a.tfidf)
       .slice(0, 10);
 
-    // Monta payload final
     const payload = {
       people: {
         totalProfiles,
@@ -385,7 +363,7 @@ export async function GET(_req: NextRequest) {
         usersWithCertificates,
         avgCertificatesPerUser,
         topCertifiedSkills,
-        topCertificatesRanked, // <- NOVO bloco com TF-IDF + ocorrências
+        topCertificatesRanked,
       },
     };
 
