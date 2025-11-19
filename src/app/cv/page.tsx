@@ -1,16 +1,19 @@
 // src/app/cv/page.tsx
 "use client";
 
-import React, { useEffect, useState, useRef, useCallback } from "react";
-import { CertificateUpload } from "@/components/certificateUpload";
+import React, { useEffect, useMemo, useState } from "react";
 import { AuthGuard } from "@/components/authGuard";
-import { supabase } from "@/lib/supabaseClient";
+import { CertificateUpload } from "@/components/certificateUpload";
 import { useSupabaseUser } from "@/hooks/useSupabaseUser";
+import { supabase } from "@/lib/supabaseClient";
+import { matchTFIDF } from "@/lib/tfidf";
 
-type CertificateSkill = {
-  skill_id: string;
-  skill_name: string;
+type SkillOption = {
+  id: string;
+  name: string;
+  category: string | null;
 };
+
 
 type Certificate = {
   id: string;
@@ -21,39 +24,50 @@ type Certificate = {
   chave_validacao: string | null;
   file_url: string | null;
   raw_text: string | null;
-  skills: CertificateSkill[];
+  // Supabase retorna uma estrutura aninhada; tipamos como any[] para simplificar
+  certificate_skills?: any[];
 };
 
-type SkillOption = {
-  id: string;
-  name: string;
-  category: string | null;
+
+type UserSkillRef = {
+  skill_id: string;
+  kind: "have" | "learning";
+  level: string | null;
 };
 
 export default function CvPage() {
   const { user, loading: loadingUser } = useSupabaseUser();
 
   const [certificates, setCertificates] = useState<Certificate[]>([]);
-  const [loadingCerts, setLoadingCerts] = useState(true);
+  const [loadingCerts, setLoadingCerts] = useState(false);
   const [savingCertId, setSavingCertId] = useState<string | null>(null);
   const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
+
+  const [allSkills, setAllSkills] = useState<SkillOption[]>([]);
+  const [skillsLoaded, setSkillsLoaded] = useState(false);
+
+  // skills do usuário para referência (pra saber se já existe em user_skills)
+  const [userSkills, setUserSkills] = useState<UserSkillRef[]>([]);
+
+  // busca por skill por certificado (campo de search)
+  const [searchTermByCert, setSearchTermByCert] = useState<Record<string, string>>(
+    {}
+  );
+  const [searchResultsByCert, setSearchResultsByCert] = useState<
+    Record<string, SkillOption[]>
+  >({});
+
+  // configuração de como a skill do certificado entra no perfil
+  const [certSkillKind, setCertSkillKind] = useState<"have" | "learning">("have");
+  const [certSkillLevel, setCertSkillLevel] = useState("intermediário");
+
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // busca de skills por certificado
-  const [skillSearch, setSkillSearch] = useState<string>("");
-  const [skillResults, setSkillResults] = useState<SkillOption[]>([]);
-  const [skillLoading, setSkillLoading] = useState(false);
-  const [skillSearchTouched, setSkillSearchTouched] = useState(false);
-  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [certIdForSkill, setCertIdForSkill] = useState<string | null>(null);
-
-  // ---------------------------------------------------
-  // Carregar certificados do usuário
-  // ---------------------------------------------------
-  const fetchCertificates = useCallback(async () => {
-    if (!user || loadingUser) return;
-
+  // ---------------------------
+  // Carregar certificados
+  // ---------------------------
+  async function loadCertificates() {
+    if (!user) return;
     setLoadingCerts(true);
     setErrorMsg(null);
 
@@ -71,258 +85,360 @@ export default function CvPage() {
         raw_text,
         certificate_skills (
           skill_id,
-          skills ( name )
+          skills (
+            id,
+            name,
+            category
+          )
         )
       `
       )
       .eq("user_id", user.id)
-      .order("created_at", { ascending: false });
+      .order("data_emissao", { ascending: false });
 
     if (error) {
-      console.error("Erro ao carregar certificados:", error);
-      setErrorMsg("Não foi possível carregar seus certificados.");
-    } else if (data) {
-      const rows = data as any[];
-
-      const mapped: Certificate[] = rows.map((row) => ({
-        id: row.id,
-        titulo: row.titulo,
-        emissor: row.emissor,
-        data_emissao: row.data_emissao,
-        carga_horaria: row.carga_horaria,
-        chave_validacao: row.chave_validacao,
-        file_url: row.file_url,
-        raw_text: row.raw_text,
-        skills:
-          row.certificate_skills?.map((cs: any) => ({
-            skill_id: cs.skill_id,
-            skill_name: cs.skills?.name ?? "",
-          })) ?? [],
-      }));
-      setCertificates(mapped);
+      console.error("Erro ao carregar certificados:", error.message);
+      setErrorMsg("Erro ao carregar seus certificados.");
+    } else {
+      setCertificates(data || []);
     }
 
     setLoadingCerts(false);
-  }, [user, loadingUser]);
-
-  useEffect(() => {
-    fetchCertificates();
-  }, [fetchCertificates]);
-
-  // callback chamado depois que o CertificateUpload terminar de salvar
-  function handleCertificatesSaved() {
-    // sem argumentos, casa com o tipo onSaved?: () => void;
-    fetchCertificates();
   }
 
-  // ---------------------------------------------------
-  // Atualizar certificado
-  // ---------------------------------------------------
-  async function handleUpdateCertificate(cert: Certificate) {
+  // ---------------------------
+  // Carregar catálogo de skills
+  // ---------------------------
+  async function loadAllSkills() {
+    const { data, error } = await supabase
+      .from("skills")
+      .select("id, name, category")
+      .order("name");
+
+    if (error) {
+      console.error("Erro ao carregar skills:", error.message);
+    } else {
+      setAllSkills(data || []);
+      setSkillsLoaded(true);
+    }
+  }
+
+  // ---------------------------
+  // Carregar user_skills (perfil)
+  // ---------------------------
+  async function loadUserSkills() {
     if (!user) return;
 
+    const { data, error } = await supabase
+      .from("user_skills")
+      .select("skill_id, kind, level")
+      .eq("user_id", user.id);
+
+    if (error) {
+      console.error("Erro ao carregar user_skills:", error.message);
+      return;
+    }
+
+    setUserSkills(
+      (data || []).map((row: any) => ({
+        skill_id: row.skill_id,
+        kind: row.kind as "have" | "learning",
+        level: row.level,
+      }))
+    );
+  }
+
+  useEffect(() => {
+    if (user) {
+      loadCertificates();
+      loadAllSkills();
+      loadUserSkills();
+    }
+  }, [user]);
+
+  // ---------------------------
+  // Helpers de skills do certificado
+  // ---------------------------
+  function getCurrentSkillsForCert(cert: Certificate): SkillOption[] {
+    return (
+      cert.certificate_skills
+        ?.map((cs) =>
+          cs.skills
+            ? {
+                id: cs.skills.id,
+                name: cs.skills.name,
+                category: cs.skills.category,
+              }
+            : null
+        )
+        .filter((s): s is SkillOption => s !== null) || []
+    );
+  }
+
+  function isSkillAlreadyLinked(cert: Certificate, skillId: string) {
+    return getCurrentSkillsForCert(cert).some((s) => s.id === skillId);
+  }
+
+  // Sugestões automáticas usando TF-IDF
+  const tfidfSuggestionsByCert: Record<string, SkillOption[]> = useMemo(() => {
+    if (!skillsLoaded || allSkills.length === 0) return {};
+
+    const result: Record<string, SkillOption[]> = {};
+    certificates.forEach((cert) => {
+      const text = cert.raw_text || cert.titulo || "";
+      if (!text) {
+        result[cert.id] = [];
+        return;
+      }
+
+      const scored = allSkills.map((skill) => ({
+        skill,
+        score: matchTFIDF(text, skill.name),
+      }));
+
+      const selected = scored
+        .filter((s) => s.score > 0) // threshold simples
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5)
+        .map((s) => s.skill);
+
+      result[cert.id] = selected;
+    });
+
+    return result;
+  }, [certificates, allSkills, skillsLoaded]);
+
+  // ---------------------------
+  // Editar certificado
+  // ---------------------------
+  async function handleUpdateCertificate(cert: Certificate, patch: Partial<Certificate>) {
+    if (!user) return;
     setSavingCertId(cert.id);
     setErrorMsg(null);
-    setSuccessMsg(null);
 
     const { error } = await supabase
       .from("certificates")
       .update({
-        titulo: cert.titulo,
-        emissor: cert.emissor,
-        data_emissao: cert.data_emissao,
-        carga_horaria: cert.carga_horaria,
-        chave_validacao: cert.chave_validacao,
-        raw_text: cert.raw_text,
+        titulo: patch.titulo ?? cert.titulo,
+        emissor: patch.emissor ?? cert.emissor,
+        data_emissao: patch.data_emissao ?? cert.data_emissao,
+        carga_horaria: patch.carga_horaria ?? cert.carga_horaria,
+        chave_validacao: patch.chave_validacao ?? cert.chave_validacao,
       })
       .eq("id", cert.id)
       .eq("user_id", user.id);
 
     if (error) {
-      console.error("Erro ao atualizar certificado:", error);
-      setErrorMsg("Erro ao atualizar certificado.");
+      console.error("Erro ao salvar certificado:", error.message);
+      setErrorMsg("Erro ao salvar alterações do certificado.");
     } else {
-      setSuccessMsg("Certificado atualizado.");
+      await loadCertificates();
     }
 
     setSavingCertId(null);
   }
 
-  // ---------------------------------------------------
+  // ---------------------------
   // Remover certificado
-  // ---------------------------------------------------
-  async function handleDeleteCertificate(certId: string) {
+  // ---------------------------
+  async function handleDeleteCertificate(cert: Certificate) {
     if (!user) return;
 
-    setDeletingCertId(certId);
+    const confirmed = window.confirm(
+      `Tem certeza que deseja remover o certificado "${cert.titulo || "sem título"}"?`
+    );
+    if (!confirmed) return;
+
+    setDeletingCertId(cert.id);
     setErrorMsg(null);
-    setSuccessMsg(null);
 
-    const { error } = await supabase
-      .from("certificates")
-      .delete()
-      .eq("id", certId)
-      .eq("user_id", user.id);
+    try {
+      // Remove links de skills primeiro (caso não tenha cascade)
+      await supabase
+        .from("certificate_skills")
+        .delete()
+        .eq("certificate_id", cert.id);
 
-    if (error) {
-      console.error("Erro ao remover certificado:", error);
-      setErrorMsg("Erro ao remover certificado.");
-    } else {
-      setCertificates((prev) => prev.filter((c) => c.id !== certId));
-      setSuccessMsg("Certificado removido.");
-    }
+      const { error } = await supabase
+        .from("certificates")
+        .delete()
+        .eq("id", cert.id)
+        .eq("user_id", user.id);
 
-    setDeletingCertId(null);
-  }
-
-  // ---------------------------------------------------
-  // Busca de skills por certificado
-  // ---------------------------------------------------
-  async function handleSearchSkills(term: string, certId: string) {
-    setSkillSearch(term);
-    setSkillResults([]);
-    setSkillSearchTouched(true);
-    setCertIdForSkill(certId);
-
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current);
-    }
-
-    const trimmed = term.trim();
-    if (trimmed.length < 2) {
-      setSkillLoading(false);
-      return;
-    }
-
-    setSkillLoading(true);
-
-    searchTimeoutRef.current = setTimeout(async () => {
-      try {
-        const res = await fetch(
-          `/api/skills/search?q=${encodeURIComponent(trimmed)}&limit=10`
-        );
-        if (!res.ok) {
-          console.error("Falha ao buscar skills");
-          setSkillLoading(false);
-          return;
-        }
-        const json = (await res.json()) as {
-          skills?: { id: string; name: string; category?: string | null }[];
-        };
-        setSkillResults(
-          (json.skills || []).map((s) => ({
-            id: s.id,
-            name: s.name,
-            category: s.category ?? null,
-          }))
-        );
-      } catch (err) {
-        console.error("Erro ao chamar /api/skills/search:", err);
-      } finally {
-        setSkillLoading(false);
+      if (error) {
+        console.error("Erro ao remover certificado:", error.message);
+        setErrorMsg("Erro ao remover certificado.");
+      } else {
+        setCertificates((prev) => prev.filter((c) => c.id !== cert.id));
       }
-    }, 300);
+    } finally {
+      setDeletingCertId(null);
+    }
   }
 
-  // ---------------------------------------------------
-  // Vincular skill ao certificado
-  // ---------------------------------------------------
-  async function handleAddSkillToCertificate(certId: string, skill: SkillOption) {
+  // ---------------------------
+  // Atribuir / remover skills do certificado
+  // (aqui também alimenta user_skills)
+  // ---------------------------
+  async function handleAddSkillToCertificate(cert: Certificate, skill: SkillOption) {
     if (!user) return;
 
     setErrorMsg(null);
-    setSuccessMsg(null);
 
-    // evita duplicar
-    const cert = certificates.find((c) => c.id === certId);
-    if (cert && cert.skills.some((s) => s.skill_id === skill.id)) {
-      setErrorMsg("Essa skill já está vinculada a este certificado.");
-      return;
-    }
+    try {
+      // 1) Vincula a skill ao certificado (certificate_skills)
+      if (!isSkillAlreadyLinked(cert, skill.id)) {
+        const { error: certSkillError } = await supabase
+          .from("certificate_skills")
+          .upsert({
+            certificate_id: cert.id,
+            skill_id: skill.id,
+          });
 
-    const { error } = await supabase.from("certificate_skills").insert({
-      certificate_id: certId,
-      skill_id: skill.id,
-    });
+        if (certSkillError) {
+          console.error(
+            "Erro ao vincular skill ao certificado:",
+            certSkillError.message
+          );
+          throw new Error("Erro ao vincular skill ao certificado.");
+        }
 
-    if (error) {
-      console.error("Erro ao vincular skill ao certificado:", error);
-      setErrorMsg("Erro ao vincular skill ao certificado.");
-    } else {
-      setCertificates((prev) =>
-        prev.map((c) =>
-          c.id === certId
-            ? {
-                ...c,
-                skills: [
-                  ...c.skills,
-                  { skill_id: skill.id, skill_name: skill.name },
-                ],
-              }
-            : c
-        )
-      );
-      setSkillSearch("");
-      setSkillResults([]);
-      setCertIdForSkill(null);
-      setSuccessMsg("Skill vinculada ao certificado.");
+        // Atualiza estado local dos certificados
+        setCertificates((prev) =>
+          prev.map((c) =>
+            c.id === cert.id
+              ? {
+                  ...c,
+                  certificate_skills: [
+                    ...(c.certificate_skills || []),
+                    {
+                      skill_id: skill.id,
+                      skills: {
+                        id: skill.id,
+                        name: skill.name,
+                        category: skill.category,
+                      },
+                    },
+                  ],
+                }
+              : c
+          )
+        );
+      }
+
+      // 2) Garante que essa skill também aparece no perfil (user_skills)
+      //    se ainda não existir.
+      const { data: existing, error: existingError } = await supabase
+        .from("user_skills")
+        .select("skill_id, kind, level")
+        .eq("user_id", user.id)
+        .eq("skill_id", skill.id)
+        .maybeSingle();
+
+      if (existingError) {
+        console.error("Erro ao verificar user_skills:", existingError.message);
+        // não dou throw aqui, pra não quebrar o fluxo do certificado
+      }
+
+      if (!existing) {
+        const { error: insertError } = await supabase.from("user_skills").insert({
+          user_id: user.id,
+          skill_id: skill.id,
+          kind: certSkillKind,
+          level: certSkillLevel,
+        });
+
+        if (insertError) {
+          console.error("Erro ao criar user_skill:", insertError.message);
+          setErrorMsg(
+            "Skill vinculada ao certificado, mas houve erro ao adicioná-la ao perfil."
+          );
+        } else {
+          setUserSkills((prev) => [
+            ...prev,
+            {
+              skill_id: skill.id,
+              kind: certSkillKind,
+              level: certSkillLevel,
+            },
+          ]);
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg(err.message || "Erro ao vincular skill.");
     }
   }
 
-  // ---------------------------------------------------
-  // Remover skill do certificado
-  // ---------------------------------------------------
   async function handleRemoveSkillFromCertificate(
-    certId: string,
+    cert: Certificate,
     skillId: string
   ) {
-    if (!user) return;
-
     const { error } = await supabase
       .from("certificate_skills")
       .delete()
-      .eq("certificate_id", certId)
+      .eq("certificate_id", cert.id)
       .eq("skill_id", skillId);
 
     if (error) {
-      console.error("Erro ao remover skill do certificado:", error);
+      console.error("Erro ao remover skill do certificado:", error.message);
       setErrorMsg("Erro ao remover skill do certificado.");
-    } else {
-      setCertificates((prev) =>
-        prev.map((c) =>
-          c.id === certId
-            ? {
-                ...c,
-                skills: c.skills.filter((s) => s.skill_id !== skillId),
-              }
-            : c
-        )
-      );
+      return;
     }
-  }
 
-  // ---------------------------------------------------
-  // Atualizar certificado localmente (inputs controlados)
-  // ---------------------------------------------------
-  function updateCertificateLocal(
-    certId: string,
-    patch: Partial<Certificate>
-  ) {
     setCertificates((prev) =>
-      prev.map((c) => (c.id === certId ? { ...c, ...patch } : c))
+      prev.map((c) =>
+        c.id === cert.id
+          ? {
+              ...c,
+              certificate_skills: (c.certificate_skills || []).filter(
+                (cs) => cs.skill_id !== skillId
+              ),
+            }
+          : c
+      )
     );
   }
 
-  // ---------------------------------------------------
-  // Render
-  // ---------------------------------------------------
+  // ---------------------------
+  // Busca de skills (input por certificado)
+  // ---------------------------
+  async function handleSearchSkills(certId: string, term: string) {
+    setSearchTermByCert((prev) => ({ ...prev, [certId]: term }));
+
+    if (!term.trim()) {
+      setSearchResultsByCert((prev) => ({ ...prev, [certId]: [] }));
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `/api/skills/search?q=${encodeURIComponent(term)}&limit=8`
+      );
+      if (!res.ok) throw new Error("Erro ao buscar skills");
+
+      const json = (await res.json()) as { skills: SkillOption[] };
+      setSearchResultsByCert((prev) => ({ ...prev, [certId]: json.skills }));
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   if (loadingUser) {
     return (
-      <AuthGuard>
-        <main className="space-y-4">
-          <p className="text-xs text-slate-400">Carregando usuário...</p>
-        </main>
-      </AuthGuard>
+      <main className="max-w-3xl mx-auto card">
+        <p className="text-sm text-slate-300">Carregando usuário...</p>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return (
+      <main className="max-w-3xl mx-auto card">
+        <p className="text-sm text-slate-300">
+          Você precisa estar autenticado para acessar o currículo vivo.
+        </p>
+      </main>
     );
   }
 
@@ -331,228 +447,357 @@ export default function CvPage() {
       <main className="space-y-4">
         <div className="card">
           <h2 className="text-lg font-semibold">Currículo vivo</h2>
-          <p className="text-sm text-slate-300">
+          <p className="text-sm text-slate-300 mt-1">
             Aqui você junta experiências de microtarefas e certificados lidos por
             OCR para compor seu currículo vivo.
           </p>
         </div>
 
-        {/* Upload + OCR etc (o próprio componente salva no backend e chama onSaved) */}
-        <CertificateUpload onSaved={handleCertificatesSaved} />
+        {/* Upload com OCR, igual antes */}
+        <CertificateUpload
+          onSaved={() => {
+            loadCertificates();
+          }}
+        />
 
         {/* Lista de certificados */}
         <section className="card space-y-3">
-          <h3 className="text-sm font-semibold text-slate-200">
-            Certificados cadastrados
-          </h3>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold">Certificados salvos</h3>
+            {loadingCerts && (
+              <span className="text-xs text-slate-400">Carregando...</span>
+            )}
+          </div>
 
-          {loadingCerts ? (
-            <p className="text-xs text-slate-400">Carregando certificados...</p>
-          ) : certificates.length === 0 ? (
-            <p className="text-xs text-slate-500">
-              Você ainda não cadastrou nenhum certificado.
+          {errorMsg && (
+            <p className="text-xs text-red-400 mb-2">{errorMsg}</p>
+          )}
+
+          {certificates.length === 0 && !loadingCerts && (
+            <p className="text-xs text-slate-400">
+              Nenhum certificado salvo ainda. Envie o primeiro usando o upload
+              acima.
             </p>
-          ) : (
-            <div className="space-y-3">
-              {certificates.map((cert) => (
+          )}
+
+          <div className="space-y-4">
+            {certificates.map((cert) => {
+              const currentSkills = getCurrentSkillsForCert(cert);
+              const tfidfSuggestions = tfidfSuggestionsByCert[cert.id] || [];
+              const searchTerm = searchTermByCert[cert.id] || "";
+              const searchResults = searchResultsByCert[cert.id] || [];
+
+              return (
                 <div
                   key={cert.id}
-                  className="border border-slate-800 rounded-xl p-3 text-xs space-y-2"
+                  className="border border-slate-800 rounded-xl p-3 space-y-3 bg-slate-950/40"
                 >
-                  <div className="flex justify-between gap-3">
-                    <div className="flex-1 space-y-1">
+                  <div className="flex justify-between gap-2">
+                    <div className="flex-1 min-w-0">
                       <input
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs font-semibold"
+                        className="w-full bg-transparent text-sm font-semibold text-slate-50 outline-none border-b border-transparent focus:border-emerald-400"
                         value={cert.titulo || ""}
+                        placeholder="Título do curso / certificação"
                         onChange={(e) =>
-                          updateCertificateLocal(cert.id, {
-                            titulo: e.target.value,
-                          })
+                          setCertificates((prev) =>
+                            prev.map((c) =>
+                              c.id === cert.id
+                                ? { ...c, titulo: e.target.value }
+                                : c
+                            )
+                          )
                         }
-                        placeholder="Título do curso"
                       />
-                      <input
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs"
-                        value={cert.emissor || ""}
-                        onChange={(e) =>
-                          updateCertificateLocal(cert.id, {
-                            emissor: e.target.value,
-                          })
-                        }
-                        placeholder="Emissor"
-                      />
-                      <div className="flex gap-2">
+                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-slate-400">
+                        <span>
+                          Emissor:{" "}
+                          <input
+                            className="bg-transparent border-b border-transparent focus:border-slate-600 outline-none"
+                            value={cert.emissor || ""}
+                            placeholder="Instituição emissora"
+                            onChange={(e) =>
+                              setCertificates((prev) =>
+                                prev.map((c) =>
+                                  c.id === cert.id
+                                    ? { ...c, emissor: e.target.value }
+                                    : c
+                                )
+                              )
+                            }
+                          />
+                        </span>
+                        <span>•</span>
+                        <span>
+                          <label htmlFor={`data-emissao-${cert.id}`}>
+                          Data:{" "}
+                          </label>
+                          <input
+                            id={`data-emissao-${cert.id}`} // O ID associa o input à label
+                            type="date"
+                            className="bg-transparent border-b border-transparent focus:border-slate-600 outline-none"
+                            value={cert.data_emissao || ""}
+                            onChange={(e) =>
+                              setCertificates((prev) =>
+                                prev.map((c) =>
+                                  c.id === cert.id
+                                    ? { ...c, data_emissao: e.target.value }
+                                    : c
+                                )
+                              )
+                            }
+                          />
+                        </span>
+                        <span>•</span>
+                        <span>
+                          <label htmlFor={`carga-horaria-${cert.id}`}>
+                          Carga horária:{" "}
+                          </label>
+                          <input
+                            id={`carga-horaria-${cert.id}`}
+                            type="number"
+                            className="w-16 bg-transparent border-b border-transparent focus:border-slate-600 outline-none"
+                            value={cert.carga_horaria ?? ""}
+                            onChange={(e) =>
+                              setCertificates((prev) =>
+                                prev.map((c) =>
+                                  c.id === cert.id
+                                    ? {
+                                        ...c,
+                                        carga_horaria: e.target.value
+                                          ? Number(e.target.value)
+                                          : null,
+                                      }
+                                    : c
+                                )
+                              )
+                            }
+                          />{" "}
+                          h
+                        </span>
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        Chave de validação:{" "}
                         <input
-                          className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs"
-                          value={cert.data_emissao || ""}
+                          className="bg-transparent border-b border-transparent focus:border-slate-600 outline-none w-56"
+                          value={cert.chave_validacao || ""}
+                          placeholder="Opcional"
                           onChange={(e) =>
-                            updateCertificateLocal(cert.id, {
-                              data_emissao: e.target.value,
-                            })
+                            setCertificates((prev) =>
+                              prev.map((c) =>
+                                c.id === cert.id
+                                  ? { ...c, chave_validacao: e.target.value }
+                                  : c
+                              )
+                            )
                           }
-                          placeholder="Data emissão (YYYY-MM-DD)"
-                        />
-                        <input
-                          className="w-20 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs"
-                          value={
-                            cert.carga_horaria != null
-                              ? String(cert.carga_horaria)
-                              : ""
-                          }
-                          onChange={(e) =>
-                            updateCertificateLocal(cert.id, {
-                              carga_horaria: e.target.value
-                                ? Number(e.target.value)
-                                : null,
-                            })
-                          }
-                          placeholder="Horas"
                         />
                       </div>
-                      <input
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs"
-                        value={cert.chave_validacao || ""}
-                        onChange={(e) =>
-                          updateCertificateLocal(cert.id, {
-                            chave_validacao: e.target.value,
-                          })
-                        }
-                        placeholder="Chave de validação (opcional)"
-                      />
                     </div>
 
-                    <div className="flex flex-col items-end gap-2">
+                    <div className="flex flex-col items-end gap-2 text-xs">
                       {cert.file_url && (
                         <a
                           href={cert.file_url}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-[11px] text-emerald-400 hover:underline"
+                          className="px-2 py-1 rounded-lg border border-slate-700 hover:border-emerald-400"
                         >
                           Ver arquivo
                         </a>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => handleUpdateCertificate(cert)}
-                        disabled={savingCertId === cert.id}
-                        className="px-3 py-1 rounded-lg bg-emerald-500 text-slate-950 text-[11px] font-medium hover:bg-emerald-400 disabled:opacity-60"
-                      >
-                        {savingCertId === cert.id
-                          ? "Salvando..."
-                          : "Salvar alterações"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteCertificate(cert.id)}
-                        disabled={deletingCertId === cert.id}
-                        className="px-3 py-1 rounded-lg border border-red-500 text-red-400 text-[11px] hover:bg-red-500/10 disabled:opacity-60"
-                      >
-                        {deletingCertId === cert.id ? "Removendo..." : "Remover"}
-                      </button>
+
+                      <div className="flex gap-2">
+                        <button
+                          className="px-2 py-1 rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
+                          disabled={savingCertId === cert.id}
+                          onClick={() =>
+                            handleUpdateCertificate(cert, {
+                              titulo: cert.titulo,
+                              emissor: cert.emissor,
+                              data_emissao: cert.data_emissao,
+                              carga_horaria: cert.carga_horaria,
+                              chave_validacao: cert.chave_validacao,
+                            })
+                          }
+                        >
+                          {savingCertId === cert.id ? "Salvando..." : "Salvar"}
+                        </button>
+                        <button
+                          className="px-2 py-1 rounded-lg border border-red-500 text-red-300 hover:bg-red-500/10 disabled:opacity-60"
+                          disabled={deletingCertId === cert.id}
+                          onClick={() => handleDeleteCertificate(cert)}
+                        >
+                          {deletingCertId === cert.id ? "Removendo..." : "Remover"}
+                        </button>
+                      </div>
                     </div>
                   </div>
 
-                  {/* Skills desse certificado */}
-                  <div className="space-y-1">
-                    <p className="text-[11px] text-slate-400">
-                      Skills relacionadas a este certificado:
-                    </p>
+                  {/* Config de como a skill entra no perfil */}
+                  <div className="flex flex-wrap gap-2 items-center text-[11px] mb-2">
+                    <span className="text-slate-400">
+                      Quando eu adicionar uma skill:
+                    </span>
 
-                    {cert.skills.length === 0 ? (
-                      <p className="text-[11px] text-slate-500">
-                        Nenhuma skill vinculada ainda.
-                      </p>
-                    ) : (
-                      <div className="flex flex-wrap gap-2">
-                        {cert.skills.map((s) => (
-                          <span
-                            key={s.skill_id}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-800 border border-slate-600 text-[11px]"
+                    <button
+                      type="button"
+                      className={`px-2 py-1 rounded-full border ${
+                        certSkillKind === "have"
+                          ? "border-emerald-400 text-emerald-400"
+                          : "border-slate-600 text-slate-300"
+                      }`}
+                      onClick={() => setCertSkillKind("have")}
+                    >
+                      Conta como skill que tenho
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`px-2 py-1 rounded-full border ${
+                        certSkillKind === "learning"
+                          ? "border-emerald-400 text-emerald-400"
+                          : "border-slate-600 text-slate-300"
+                      }`}
+                      onClick={() => setCertSkillKind("learning")}
+                    >
+                      Conta como skill que estou aprendendo
+                    </button>
+
+                    <span className="ml-2 text-slate-400">Nível:</span>
+                    <label 
+                      htmlFor={`nivel-habilidade-${cert.id}`} 
+                      className="ml-2 text-slate-400"
+                    >
+                      Nível:
+                    </label>
+                    <select
+                      id={`nivel-habilidade-${cert.id}`} // ID único para acessibilidade
+                      className="rounded-xl bg-slate-900 border border-slate-700 px-2 py-1 text-[11px]"
+                      value={certSkillLevel}
+                      onChange={(e) => setCertSkillLevel(e.target.value)}
+                    >
+                      <option value="iniciante">Iniciante</option>
+                      <option value="intermediário">Intermediário</option>
+                      <option value="avançado">Avançado</option>
+                    </select>
+                  </div>
+
+                  {/* Skills vinculadas */}
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-slate-400">Skills vinculadas</p>
+                    <div className="flex flex-wrap gap-2">
+                      {currentSkills.length === 0 && (
+                        <span className="text-[11px] text-slate-500">
+                          Nenhuma skill vinculada ainda.
+                        </span>
+                      )}
+
+                      {currentSkills.map((skill) => (
+                        <span
+                          key={skill.id}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-900 border border-slate-700 text-[11px]"
+                        >
+                          {skill.name}
+                          {skill.category && (
+                            <span className="text-[10px] text-slate-500">
+                              ({skill.category})
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="text-[10px] text-red-400 hover:text-red-300"
+                            onClick={() =>
+                              handleRemoveSkillFromCertificate(cert, skill.id)
+                            }
                           >
-                            {s.skill_name}
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Sugestões por TF-IDF */}
+                    {tfidfSuggestions.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-slate-500">
+                          Sugestões automáticas (TF-IDF)
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {tfidfSuggestions.map((skill) => (
                             <button
+                              key={skill.id}
                               type="button"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-full border border-emerald-500/60 text-[11px] text-emerald-300 hover:bg-emerald-500/10"
+                              disabled={isSkillAlreadyLinked(cert, skill.id)}
                               onClick={() =>
-                                handleRemoveSkillFromCertificate(
-                                  cert.id,
-                                  s.skill_id
-                                )
+                                handleAddSkillToCertificate(cert, skill)
                               }
-                              className="text-[10px] text-slate-400 hover:text-red-400 ml-1"
                             >
-                              ✕
+                              {skill.name}
+                              {skill.category && (
+                                <span className="text-[10px] text-emerald-200/70">
+                                  ({skill.category})
+                                </span>
+                              )}
+                              {isSkillAlreadyLinked(cert, skill.id) && (
+                                <span className="text-[9px] text-emerald-300/60">
+                                  já vinculada
+                                </span>
+                              )}
                             </button>
-                          </span>
-                        ))}
+                          ))}
+                        </div>
                       </div>
                     )}
 
-                    {/* Campo de busca de skill ligado a este certificado */}
-                    <div className="relative mt-1">
+                    {/* Busca manual de skill */}
+                    <div className="space-y-1">
+                      <p className="text-[11px] text-slate-500">
+                        Buscar e adicionar skill
+                      </p>
                       <input
                         className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs"
-                        value={certIdForSkill === cert.id ? skillSearch : ""}
+                        placeholder="Digite para buscar no catálogo de skills (ex: Python, CRM, Gestão)..."
+                        value={searchTerm}
                         onChange={(e) =>
-                          handleSearchSkills(e.target.value, cert.id)
+                          handleSearchSkills(cert.id, e.target.value)
                         }
-                        placeholder="Buscar skill para vincular (ex: Python, Kubernetes...)"
-                        autoComplete="off"
                       />
-                      {certIdForSkill === cert.id &&
-                        (skillLoading ||
-                          skillResults.length > 0 ||
-                          (skillSearchTouched &&
-                            skillSearch &&
-                            !skillLoading)) && (
-                          <div className="absolute left-0 right-0 mt-1 border border-slate-700 rounded-xl bg-slate-900 max-h-48 overflow-y-auto text-xs z-20 shadow-lg">
-                            {skillLoading && (
-                              <div className="px-3 py-2 text-slate-400">
-                                Buscando skills...
-                              </div>
-                            )}
 
-                            {!skillLoading &&
-                              skillResults.length === 0 &&
-                              skillSearch && (
-                                <div className="px-3 py-2 text-slate-500">
-                                  Nenhuma skill encontrada. Fale com o RH para
-                                  incluir no catálogo.
-                                </div>
+                      {searchResults.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-2">
+                          {searchResults.map((skill) => (
+                            <button
+                              key={skill.id}
+                              type="button"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-full border border-slate-700 text-[11px] text-slate-200 hover:border-emerald-400 hover:text-emerald-300"
+                              disabled={isSkillAlreadyLinked(cert, skill.id)}
+                              onClick={() =>
+                                handleAddSkillToCertificate(cert, skill)
+                              }
+                            >
+                              {skill.name}
+                              {skill.category && (
+                                <span className="text-[10px] text-slate-500">
+                                  ({skill.category})
+                                </span>
                               )}
-
-                            {!skillLoading &&
-                              skillResults.map((s) => (
-                                <button
-                                  key={s.id}
-                                  type="button"
-                                  className="w-full text-left px-3 py-2 hover:bg-slate-800 flex justify-between items-center"
-                                  onClick={() =>
-                                    handleAddSkillToCertificate(cert.id, s)
-                                  }
-                                >
-                                  <span>{s.name}</span>
-                                  {s.category && (
-                                    <span className="text-[10px] text-slate-400">
-                                      {s.category}
-                                    </span>
-                                  )}
-                                </button>
-                              ))}
-                          </div>
-                        )}
+                              {isSkillAlreadyLinked(cert, skill.id) && (
+                                <span className="text-[9px] text-emerald-300/60">
+                                  já vinculada
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
         </section>
-
-        {errorMsg && <p className="text-xs text-red-400">{errorMsg}</p>}
-        {successMsg && (
-          <p className="text-xs text-emerald-400">{successMsg}</p>
-        )}
       </main>
     </AuthGuard>
   );
